@@ -9,14 +9,10 @@ typedef size_t   index_t;
 
 /* future utilities */
 
-typedef enum {
-    future_done,
-    future_doing,
-    future_not_present,
-} future_state_t;
-
 typedef struct future_list_entry_s {
-    future_state_t      future_state;
+    pthread_mutex_t     fut_access;
+    pthread_cond_t      fut_access_cond;
+    int                 fut_access_cond_ok;
     void*               value;
 } future_list_entry_t;
 

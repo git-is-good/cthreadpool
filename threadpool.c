@@ -18,7 +18,9 @@ _future_list_create(size_t sz)
     fl->size = sz;
     fl->entries = (future_list_entry_t*) malloc(sizeof(future_list_entry_t) * sz);
     for ( size_t i = 0; i < sz; i++ ){
-        fl->entries[i].future_state = future_not_present;
+        pthread_mutex_init(&fl->entries[i].fut_access, NULL);
+        pthread_cond_init(&fl->entries[i].fut_access_cond, NULL);
+        fl->entries[i].fut_access_cond_ok = 0;
     }
     fl->list_pos = 0;
     fl->available_stack = (index_t*) malloc(sizeof(index_t) * sz);
@@ -29,6 +31,10 @@ _future_list_create(size_t sz)
 static void
 _future_list_destroy(future_list_t *futs)
 {
+    for ( size_t i = 0; i < futs->size; i++ ){
+        pthread_mutex_destroy(&futs->entries[i].fut_access);
+        pthread_cond_destroy(&futs->entries[i].fut_access_cond);
+    }
     free(futs->entries);
     free(futs->available_stack);
     free(futs);
@@ -196,9 +202,10 @@ _manager_handle_event_worker_done(threadpool_t *pool, index_t worker_ind)
     task_t *t = &wk->task;
     if ( t->task_type == task_gofuture ) {
         future_list_entry_t *fe = &pool->future_list->entries[t->task_fut];
-        assert( fe->future_state == future_doing );
-        fe->future_state = future_done;
+        fe->fut_access_cond_ok = 1;
         fe->value = wk->worker_task_res;
+        pthread_mutex_unlock(&fe->fut_access);
+        pthread_cond_signal(&fe->fut_access_cond);
     }
     pool->worker_available_stack[ pool->pos++ ] = worker_ind;
     _manager_assign_task(pool);
@@ -334,7 +341,8 @@ future_t
 threadpool_gofuture(threadpool_t *pool, void* (*routine)(void*), void *args)
 {
     future_t fut = _future_get_next(pool->future_list);
-    pool->future_list->entries[fut].future_state = future_doing;
+    future_list_entry_t *fe = &pool->future_list->entries[fut];
+    pthread_mutex_lock(&fe->fut_access);
     manager_event_t e;
     e.event_type = manager_event_task_addin;
     e.data.task.task_type = task_gofuture;
@@ -348,7 +356,15 @@ threadpool_gofuture(threadpool_t *pool, void* (*routine)(void*), void *args)
 void*
 threadpool_get(threadpool_t *pool, future_t fut)
 {
-
-    return NULL;
+    void *res;
+    future_list_entry_t *fe = &pool->future_list->entries[fut];
+    pthread_mutex_lock(&fe->fut_access);
+    while ( !fe->fut_access_cond_ok ){
+        pthread_cond_wait(&fe->fut_access_cond, &fe->fut_access);
+    }
+    res = fe->value;
+    fe->fut_access_cond_ok = 0;
+    pthread_mutex_unlock(&fe->fut_access);
+    return res;
 }
 
