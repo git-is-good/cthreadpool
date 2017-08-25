@@ -1,10 +1,13 @@
 #include "threadpool.h"
+#include "lock.h"
+#include "fatalerror.h"
+#include "memtools/memcheck.h"
 #include <assert.h>
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
-#include <pthread.h>
 #include <stdio.h>
+#include <pthread.h>
 
 static void* _worker_run(void*);
 static void* _manager_run(void*);
@@ -14,16 +17,15 @@ static void* _manager_run(void*);
 static future_list_t*
 _future_list_create(size_t sz)
 {
-    future_list_t *fl = (future_list_t*) malloc(sizeof(future_list_t));
+    future_list_t *fl = (future_list_t*) memcheck_malloc(sizeof(future_list_t));
     fl->size = sz;
-    fl->entries = (future_list_entry_t*) malloc(sizeof(future_list_entry_t) * sz);
+    fl->entries = (future_list_entry_t*) memcheck_malloc(sizeof(future_list_entry_t) * sz);
     for ( size_t i = 0; i < sz; i++ ){
-        pthread_mutex_init(&fl->entries[i].fut_access, NULL);
-        pthread_cond_init(&fl->entries[i].fut_access_cond, NULL);
-        fl->entries[i].fut_access_cond_ok = 0;
+        fl->entries[i].fut_access = (cond_lock_t*) memcheck_malloc(sizeof(cond_lock_t));
+        cond_lock_init(fl->entries[i].fut_access);
     }
     fl->list_pos = 0;
-    fl->available_stack = (index_t*) malloc(sizeof(index_t) * sz);
+    fl->available_stack = (index_t*) memcheck_malloc(sizeof(index_t) * sz);
     fl->available_stack_pos = 0;
     return fl;
 }
@@ -32,12 +34,12 @@ static void
 _future_list_destroy(future_list_t *futs)
 {
     for ( size_t i = 0; i < futs->size; i++ ){
-        pthread_mutex_destroy(&futs->entries[i].fut_access);
-        pthread_cond_destroy(&futs->entries[i].fut_access_cond);
+        cond_lock_destroy(futs->entries[i].fut_access);
+        memcheck_free(futs->entries[i].fut_access);
     }
-    free(futs->entries);
-    free(futs->available_stack);
-    free(futs);
+    memcheck_free(futs->entries);
+    memcheck_free(futs->available_stack);
+    memcheck_free(futs);
 }
 
 static index_t 
@@ -50,8 +52,13 @@ _future_get_next(future_list_t *futs)
     /* entries list is full */
     if ( futs->list_pos == futs->size ){
         futs->size *= 2;
-        futs->entries = (future_list_entry_t*) realloc(futs->entries, sizeof(future_list_entry_t) * futs->size);
-        futs->available_stack = (index_t*) realloc(futs->available_stack, sizeof(index_t) * futs->size);
+        futs->entries = (future_list_entry_t*) memcheck_realloc(futs->entries, sizeof(future_list_entry_t) * futs->size);
+        futs->available_stack = (index_t*) memcheck_realloc(futs->available_stack, sizeof(index_t) * futs->size);
+
+        for ( size_t i = futs->size / 2; i < futs->size; i++ ){
+            futs->entries[i].fut_access = (cond_lock_t*) memcheck_malloc(sizeof(cond_lock_t));
+            cond_lock_init(futs->entries[i].fut_access);
+        }
     }
 
     return futs->list_pos++;
@@ -72,9 +79,9 @@ _future_put_available(future_list_t *futs, index_t ind)
 static event_queue_t*
 _event_queue_create(size_t sz)
 {
-    event_queue_t *qu = (event_queue_t*) malloc(sizeof(event_queue_t));
+    event_queue_t *qu = (event_queue_t*) memcheck_malloc(sizeof(event_queue_t));
     qu->size = sz;
-    qu->events = (manager_event_t*) malloc(sizeof(manager_event_t) * sz);
+    qu->events = (manager_event_t*) memcheck_malloc(sizeof(manager_event_t) * sz);
     qu->head = 0;
     qu->tail = 0;
     return qu;
@@ -83,8 +90,8 @@ _event_queue_create(size_t sz)
 static void
 _event_queue_destroy(event_queue_t *qu)
 {
-    free(qu->events);
-    free(qu);
+    memcheck_free(qu->events);
+    memcheck_free(qu);
 }
 
 static void
@@ -92,15 +99,20 @@ _event_queue_push(event_queue_t *qu, manager_event_t *e)
 {
     /* event_queue full */
     if ( (qu->tail + 1) % qu->size == qu->head ){
-        qu->events = (manager_event_t*) realloc( qu->events, sizeof(manager_event_t) * qu->size * 2);
+#ifdef DEBUG
+        printf("doubling event_queue: old qu->size = %lu\n", qu->size);
+#endif
+        qu->events = (manager_event_t*) memcheck_realloc( qu->events, sizeof(manager_event_t) * qu->size * 2);
         if ( qu->head > qu->tail ){
             memcpy(qu->events + qu->size, qu->events, sizeof(manager_event_t) * qu->tail);
-            qu->tail = qu->head + 1 + qu->tail;
+            qu->tail += qu->size;
         }
         qu->size *= 2;
+// #ifdef DEBUG
+//         printf("double event_queue done: qu->tail - qu->head = %ld\n", qu->tail - qu->head);
+// #endif
     }
-    qu->events[ qu->tail ].event_type = e->event_type;
-    qu->events[ qu->tail ].data = e->data;
+    qu->events[ qu->tail ] = *e;
     qu->tail = (qu->tail + 1) % qu->size;
 }
 
@@ -119,9 +131,9 @@ _event_queue_pop(event_queue_t *qu)
 static task_queue_t*
 _task_queue_create(size_t sz)
 {
-    task_queue_t *qu = (task_queue_t*) malloc(sizeof(task_queue_t));
+    task_queue_t *qu = (task_queue_t*) memcheck_malloc(sizeof(task_queue_t));
     qu->size = sz;
-    qu->tasks = (task_t*) malloc(sizeof(task_t) * sz);
+    qu->tasks = (task_t*) memcheck_malloc(sizeof(task_t) * sz);
     qu->head = 0;
     qu->tail = 0;
     return qu;
@@ -130,8 +142,14 @@ _task_queue_create(size_t sz)
 static void
 _task_queue_destroy(task_queue_t *qu)
 {
-    free(qu->tasks);
-    free(qu);
+    memcheck_free(qu->tasks);
+    memcheck_free(qu);
+}
+
+static int
+_task_queue_empty(task_queue_t *qu)
+{
+    return qu->head == qu->tail;
 }
 
 static void
@@ -139,16 +157,20 @@ _task_queue_push(task_queue_t *qu, task_t *t)
 {
     /* task_queue full */
     if ( (qu->tail + 1) % qu->size == qu->head ){
-        qu->tasks = (task_t*) realloc( qu->tasks, sizeof(task_t) * qu->size * 2);
+#ifdef DEBUG
+        printf("doubling task_queue: old qu->size = %lu\n", qu->size);
+#endif
+        qu->tasks = (task_t*) memcheck_realloc( qu->tasks, sizeof(task_t) * qu->size * 2);
         if ( qu->head > qu->tail ){
             memcpy(qu->tasks + qu->size, qu->tasks, sizeof(task_t) * qu->tail);
-            qu->tail = qu->head + 1 + qu->tail;
+            qu->tail += qu->size;
         }
         qu->size *= 2;
+// #ifdef DEBUG
+//         printf("double task_queue done: qu->tail - qu->head = %ld\n", qu->tail - qu->head);
+// #endif
     }
-    qu->tasks[ qu->tail ].task_type = t->task_type;
-    qu->tasks[ qu->tail ].task_func = t->task_func;
-    qu->tasks[ qu->tail ].task_argu = t->task_argu;
+    qu->tasks[ qu->tail ] = *t;
     qu->tail = (qu->tail + 1) % qu->size;
 }
 
@@ -162,14 +184,14 @@ _task_queue_pop(task_queue_t *qu)
     return res;
 }
 
+/* threads communication */
+
 static void
 _inform_manager(threadpool_t *pool, manager_event_t *e)
 {
-    pthread_mutex_lock(&pool->manager_inform);
+    cond_lock_er_lock(&pool->manager_inform);
     _event_queue_push(pool->event_queue, e);
-    pool->manager_inform_cond_ok = 1;
-    pthread_mutex_unlock(&pool->manager_inform);
-    pthread_cond_signal(&pool->manager_inform_cond);
+    cond_lock_er_activate(&pool->manager_inform);
 }
 
 static void
@@ -181,18 +203,70 @@ _manager_assign_task(threadpool_t *pool)
 
         worker_t *wk = &pool->workers[ pool->worker_available_stack[--pool->pos] ];
         wk->task = *t;
-        pthread_mutex_lock(&wk->worker_wakeup);
-        wk->worker_wakeup_cond_ok = 1;
-        pthread_mutex_unlock(&wk->worker_wakeup);
-        pthread_cond_signal(&wk->worker_wakeup_cond);
+        cond_lock_er_lock(&wk->worker_wakeup);
+        cond_lock_er_activate(&wk->worker_wakeup);
+    }
+}
+
+static int
+_all_worker_available(threadpool_t *pool)
+{
+    return pool->size == pool->pos;
+}
+
+/* precondition: all worker available, no task*/
+static void
+_do_destroy_all(threadpool_t *pool)
+{
+    cond_lock_destroy(&pool->manager_inform);
+    cond_lock_destroy(&pool->join);
+
+    _event_queue_destroy(pool->event_queue);
+    _task_queue_destroy(pool->task_queue);
+    _future_list_destroy(pool->future_list);
+
+    for ( size_t i = 0; i < pool->size; i++ ){
+        worker_t *wk = &pool->workers[i];
+        wk->task.task_type = task_die;
+        cond_lock_er_lock(&wk->worker_wakeup);
+        cond_lock_er_activate(&wk->worker_wakeup);
+        if ( pthread_join(wk->worker, NULL) < 0 ) FATALERROR;
+
+        cond_lock_destroy(&wk->worker_wakeup);
+    }
+    memcheck_free(pool->workers);
+    memcheck_free(pool->worker_available_stack);
+    memcheck_free(pool);
+    pthread_exit(NULL);
+}
+
+static void
+_manager_handle_event_call_die(threadpool_t *pool)
+{
+    /* empty all tasks */
+    pool->state = threadpool_state_about_to_die;
+
+    if ( _all_worker_available(pool) ) {
+        assert( _task_queue_empty(pool->task_queue) );
+        _do_destroy_all(pool);
     }
 }
 
 static void
 _manager_handle_event_task_addin(threadpool_t *pool, task_t *t)
 {
-    _task_queue_push(pool->task_queue, t);
-    _manager_assign_task(pool);
+    switch (pool->state) {
+        case threadpool_state_normal:
+            cond_lock_er_lock(&pool->join);
+            cond_lock_er_disactivate(&pool->join);
+            _task_queue_push(pool->task_queue, t);
+            _manager_assign_task(pool);
+            break;
+        case threadpool_state_about_to_die:
+            break;
+        default:
+            assert(0);
+    }
 }
 
 static void
@@ -202,12 +276,24 @@ _manager_handle_event_worker_done(threadpool_t *pool, index_t worker_ind)
     task_t *t = &wk->task;
     if ( t->task_type == task_gofuture ) {
         future_list_entry_t *fe = &pool->future_list->entries[t->task_fut];
-        fe->fut_access_cond_ok = 1;
         fe->value = wk->worker_task_res;
-        pthread_mutex_unlock(&fe->fut_access);
-        pthread_cond_signal(&fe->fut_access_cond);
+        cond_lock_er_activate(fe->fut_access);
     }
     pool->worker_available_stack[ pool->pos++ ] = worker_ind;
+
+    if ( _all_worker_available(pool) && _task_queue_empty(pool->task_queue) ){
+        switch (pool->state){
+            case threadpool_state_about_to_die:
+                _do_destroy_all(pool);
+                return;
+            case threadpool_state_normal:
+                cond_lock_er_lock(&pool->join);
+                cond_lock_er_activate(&pool->join);
+                break;
+            default:
+                assert(0);
+        }
+    } 
     _manager_assign_task(pool);
 }
 
@@ -221,23 +307,22 @@ _manager_run(void *args)
 {
     threadpool_t *pool = (threadpool_t*) args;
     for ( size_t i = 0; i < pool->size; i++ ){
-        struct worker_args_s *worker_args = (struct worker_args_s*) malloc(sizeof(struct worker_args_s));
+        struct worker_args_s *worker_args = (struct worker_args_s*) memcheck_malloc(sizeof(struct worker_args_s));
         worker_args->pool = pool;
         worker_args->this_ind = i;
-        pthread_create(&pool->workers[i].worker, NULL, _worker_run, worker_args);
+        if ( pthread_create(&pool->workers[i].worker, NULL, _worker_run, worker_args) < 0 ) FATALERROR;
     }
 
-    pthread_mutex_lock(&pool->manager_inform);
     for ( ; ; ){
-        while ( !pool->manager_inform_cond_ok ){
-            pthread_cond_wait(&pool->manager_inform_cond, &pool->manager_inform);
-        }
-        pool->manager_inform_cond_ok = 0;
-        
+        cond_lock_ee_wait(&pool->manager_inform);
         /* at least one inform to manager received */
         manager_event_t *e;
         while ( (e = _event_queue_pop(pool->event_queue)) != NULL ){
             switch ( e->event_type ){
+                    break;
+                case manager_event_call_die:
+                    _manager_handle_event_call_die(pool);
+                    break;
                 case manager_event_task_addin:
                     _manager_handle_event_task_addin(pool, &e->data.task);
                     break;
@@ -248,6 +333,7 @@ _manager_run(void *args)
                     assert(0);
             }
         }
+        cond_lock_ee_finish(&pool->manager_inform);
     }
 }
 
@@ -257,15 +343,11 @@ _worker_run(void *args)
     struct worker_args_s *real_args = (struct worker_args_s*) args;
     threadpool_t *pool = real_args->pool;
     index_t this_ind = real_args->this_ind;
-    free(args);
+    memcheck_free(args);
     worker_t *worker_self = &pool->workers[this_ind];
 
-    pthread_mutex_lock(&worker_self->worker_wakeup);
     for ( ; ; ){
-        while ( !worker_self->worker_wakeup_cond_ok ){
-            pthread_cond_wait(&worker_self->worker_wakeup_cond, &worker_self->worker_wakeup);
-        }
-        worker_self->worker_wakeup_cond_ok = 0;
+        cond_lock_ee_wait(&worker_self->worker_wakeup);
         /* a new task is received */
         task_t *t = &worker_self->task;
         switch ( t->task_type ){
@@ -276,7 +358,8 @@ _worker_run(void *args)
                 worker_self->worker_task_res = t->task_func(t->task_argu);
                 break;
             case task_die:
-                return NULL;
+                pthread_exit(NULL);
+                break;
             default:
                 assert(0);
         }
@@ -284,6 +367,7 @@ _worker_run(void *args)
         e.event_type = manager_event_worker_done;
         e.data.worker_ind = this_ind;
         _inform_manager(pool, &e);
+        cond_lock_ee_finish(&worker_self->worker_wakeup);
     }
     return NULL;
 }
@@ -292,38 +376,42 @@ threadpool_t*
 threadpool_create(size_t sz)
 {
     if ( !sz ) return NULL;
+    memcheck_init();
 
-    threadpool_t *pool = (threadpool_t*) malloc(sizeof(threadpool_t));
+    threadpool_t *pool = (threadpool_t*) memcheck_malloc(sizeof(threadpool_t));
     /* manager itself at last */
-    pthread_mutex_init(&pool->manager_inform, NULL);
-    pthread_cond_init(&pool->manager_inform_cond, NULL);
-    pool->manager_inform_cond_ok = 0;
+    pool->state = threadpool_state_normal;
+    cond_lock_init(&pool->manager_inform);
+    cond_lock_init(&pool->join);
     
-    pool->event_queue = _event_queue_create(sz);
-    pool->task_queue = _task_queue_create(sz);
+    pool->event_queue = _event_queue_create(sz + 2);
+    pool->task_queue = _task_queue_create(sz + 2);
     pool->future_list = _future_list_create(sz);
     
     pool->size = sz;
-    pool->workers = (worker_t*) malloc(sizeof(worker_t) * sz);
+    pool->workers = (worker_t*) memcheck_malloc(sizeof(worker_t) * sz);
     for ( size_t i = 0; i < sz; i++ ){
         worker_t *wk = &pool->workers[i];
-        pthread_mutex_init(&wk->worker_wakeup, NULL);
-        pthread_cond_init(&wk->worker_wakeup_cond, NULL);
-        wk->worker_wakeup_cond_ok = 0;
+        cond_lock_init(&wk->worker_wakeup);
     }
-    pool->worker_available_stack = (index_t*) malloc(sizeof(index_t) * sz);
+    pool->worker_available_stack = (index_t*) memcheck_malloc(sizeof(index_t) * sz);
     for ( size_t i = 0; i < sz; i++ ){
         pool->worker_available_stack[i] = sz - 1 - i;
     }
     pool->pos = sz;
-    pthread_create(&pool->manager, NULL, _manager_run, pool);
+    if ( pthread_create(&pool->manager, NULL, _manager_run, pool) < 0 ) FATALERROR;
     return pool;
 }
 
+/* immediately return */
+/* the actual thread will terminate until all previous tasks done */
 void
 threadpool_destroy(threadpool_t *pool)
 {
-
+    manager_event_t e;
+    e.event_type = manager_event_call_die;
+    if ( pthread_detach(pool->manager) < 0 ) FATALERROR;
+    _inform_manager(pool, &e);
 }
 
 void
@@ -340,9 +428,14 @@ threadpool_goroutine(threadpool_t *pool, void (*routine)(void*), void *args)
 future_t 
 threadpool_gofuture(threadpool_t *pool, void* (*routine)(void*), void *args)
 {
+    /* manager might be accessing a future_list_entry */
+    /* a potential realloc will destroy it */
+    cond_lock_lock(&pool->manager_inform);
     future_t fut = _future_get_next(pool->future_list);
+    cond_lock_unlock(&pool->manager_inform);
+
     future_list_entry_t *fe = &pool->future_list->entries[fut];
-    pthread_mutex_lock(&fe->fut_access);
+    cond_lock_er_lock(fe->fut_access);
     manager_event_t e;
     e.event_type = manager_event_task_addin;
     e.data.task.task_type = task_gofuture;
@@ -358,13 +451,16 @@ threadpool_get(threadpool_t *pool, future_t fut)
 {
     void *res;
     future_list_entry_t *fe = &pool->future_list->entries[fut];
-    pthread_mutex_lock(&fe->fut_access);
-    while ( !fe->fut_access_cond_ok ){
-        pthread_cond_wait(&fe->fut_access_cond, &fe->fut_access);
-    }
+    cond_lock_ee_wait(fe->fut_access);
     res = fe->value;
-    fe->fut_access_cond_ok = 0;
-    pthread_mutex_unlock(&fe->fut_access);
+    cond_lock_ee_finish(fe->fut_access);
+    _future_put_available(pool->future_list, fut);
     return res;
 }
 
+void
+threadpool_join(threadpool_t *pool)
+{
+    cond_lock_ee_wait(&pool->join);
+    cond_lock_unlock(&pool->join);
+}

@@ -1,7 +1,7 @@
 #ifndef _THREADPOOL_H_
 #define _THREADPOOL_H_
 
-#include <pthread.h>
+#include "lock.h"
 #include <stddef.h>
 
 typedef int      future_t;
@@ -10,9 +10,8 @@ typedef size_t   index_t;
 /* future utilities */
 
 typedef struct future_list_entry_s {
-    pthread_mutex_t     fut_access;
-    pthread_cond_t      fut_access_cond;
-    int                 fut_access_cond_ok;
+    /* subject to realloc */
+    cond_lock_t         *fut_access;
     void*               value;
 } future_list_entry_t;
 
@@ -53,7 +52,11 @@ typedef struct task_queue_s {
 /* event_queue utilities */
 
 typedef enum {
+    /* event from user */
+    manager_event_call_die,
     manager_event_task_addin,
+
+    /* event from worker */
     manager_event_worker_done,
 } manager_event_type_t;
 
@@ -74,24 +77,25 @@ typedef struct event_queue_s {
 
 typedef struct worker_s {
     pthread_t           worker;
-    pthread_mutex_t     worker_wakeup;
-    pthread_cond_t      worker_wakeup_cond;
-    int                 worker_wakeup_cond_ok;
+    cond_lock_t         worker_wakeup;
 
     task_t              task;
     void*               worker_task_res;
 } worker_t;
 
+typedef enum {
+    threadpool_state_normal,
+    threadpool_state_about_to_die,
+} threadpool_state_t;
 
 typedef struct threadpool_s {
     pthread_t           manager;
-    pthread_mutex_t     manager_inform;
-    pthread_cond_t      manager_inform_cond;
-    int                 manager_inform_cond_ok;
+    threadpool_state_t  state;
+    cond_lock_t         manager_inform;
+    cond_lock_t         join;
+
     event_queue_t       *event_queue;
-
     task_queue_t        *task_queue;
-
     future_list_t       *future_list;
 
     size_t              size;
@@ -110,5 +114,8 @@ void threadpool_goroutine(threadpool_t *pool, void (*routine)(void*), void *args
 /* compute future result */
 future_t threadpool_gofuture(threadpool_t *pool, void* (*routine)(void*), void *args);
 void *threadpool_get(threadpool_t *pool, future_t fut);
+
+/* block until all tasks are finished */
+void threadpool_join(threadpool_t *pool);
 
 #endif /* _THREADPOOL_H_ */
