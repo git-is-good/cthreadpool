@@ -10,7 +10,7 @@ void routine(void *dumb){
 
 void evil(void *dumb){
     printf("evil sleep@ %lu: %lu\n", pthread_self(), (unsigned long)dumb);
-    sleep(1);//(unsigned long)dumb);
+//    sleep(1);//(unsigned long)dumb);
 }
 
 void *futroutine(void *dumb) { return (void*)((long)dumb + 1); }
@@ -51,7 +51,7 @@ void test_create_leak(){
 int main(){
     testbasic();
 //    test_create_leak();    
-    sleep(3);
+    sleep(5);
     memcheck_check();
     printf("main thread about to terminate\n");
     _exit(0);

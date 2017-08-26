@@ -62,6 +62,23 @@ typedef struct HashTableIter {
     TableEntry *inBucketPoint;
 } HashTableIter;
 
+#define createHashTable createHashTable_memcheck
+#define destroyHashTable destroyHashTable_memcheck
+
+#define removeKey removeKey_memcheck
+#define putKeyValue putKeyValue_memcheck
+
+#define hasKey hasKey_memcheck
+#define findKey findKey_memcheck
+#define findValueByKey findValueByKey_memcheck
+
+#define getHashTableSize getHashTableSize_memcheck
+
+#define getHashTableIter getHashTableIter_memcheck
+#define destroyHashTableIter destroyHashTableIter_memcheck
+#define hasNextElement hasNextElement_memcheck
+#define nextElement nextElement_memcheck
+
 HashTable* createHashTable(size_t size);
 void destroyHashTable(HashTable *tb);
 

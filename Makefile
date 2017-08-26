@@ -4,6 +4,9 @@ ifeq ($(DEBUG), 1)
 	BUILDFLAGS += -g -DDEBUG
 endif
 
+# memtools need multithread version
+BUILDFLAGS += -DMEMCHECK_MULTITHREAD
+
 # $(MEMTOOLSDIR)
 MEMTOOLSDIR   := memtools
 MEMTOOLSHEADS := $(MEMTOOLSDIR)/memcheck.h $(MEMTOOLSDIR)/hashtable_memcheck.h $(MEMTOOLSDIR)/fatalerror.h
@@ -19,7 +22,7 @@ OBJS := threadpool.o test.o
 
 all: $(TARGETS)
 
-%.o: %.c $(HEADERS)
+%.o: %.c $(HEADERS) $(MEMTOOLSHEADS)
 	gcc -o $@ -c $(BUILDFLAGS) $<
 
 test: $(OBJS) $(MEMTOOLSOBJS)
